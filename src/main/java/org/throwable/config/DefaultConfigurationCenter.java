@@ -5,14 +5,16 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.curator.RetryPolicy;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
-import org.apache.curator.framework.recipes.cache.*;
+import org.apache.curator.framework.recipes.cache.PathChildrenCache;
+import org.apache.curator.framework.recipes.cache.PathChildrenCacheEvent;
 import org.apache.curator.retry.ExponentialBackoffRetry;
+import org.apache.curator.utils.CloseableUtils;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.data.Stat;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
@@ -29,6 +31,10 @@ public class DefaultConfigurationCenter implements ConfigurationCenter {
 	private volatile Map<String, String> configurations = Maps.newHashMap();
 
 	private CuratorFramework client;
+
+	private PathChildrenCache pathChildrenCache;
+
+	private ExecutorService executor = Executors.newFixedThreadPool(2);
 
 	public DefaultConfigurationCenter(String connectionString) {
 		RetryPolicy retryPolicy = new ExponentialBackoffRetry(1000, 3);
@@ -48,14 +54,13 @@ public class DefaultConfigurationCenter implements ConfigurationCenter {
 			if (null == stat) {
 				client.create().withMode(CreateMode.PERSISTENT).forPath(CONFIGURATION_ROOT_PATH);
 			}
-			Executor executor = Executors.newFixedThreadPool(2);
-			final PathChildrenCache pathChildrenCache = new PathChildrenCache(client, CONFIGURATION_ROOT_PATH, true);
+			pathChildrenCache = new PathChildrenCache(client, CONFIGURATION_ROOT_PATH, true);
 			pathChildrenCache.getListenable().addListener((curatorFramework, event) -> {
 				String eventType = event.getType().name();
 				String path = event.getData().getPath();
 				String key = path.substring(path.lastIndexOf("/") + 1);
 				String data = null != event.getData() ? new String(event.getData().getData(), "UTF-8") : "";
-				System.out.println(String.format("eventType:%s,path:%s,data:%s", eventType, path, data));
+				log.debug(String.format("eventType:%s,path:%s,data:%s", eventType, path, data));
 				if (PathChildrenCacheEvent.Type.CHILD_ADDED == event.getType()
 						|| PathChildrenCacheEvent.Type.CHILD_UPDATED == event.getType()) {
 					reloadSingleConfigurationMapEntity(key, data);
@@ -163,6 +168,14 @@ public class DefaultConfigurationCenter implements ConfigurationCenter {
 			return configurations.remove(key);
 		}
 		return null;
+	}
+
+	public void close() {
+		CloseableUtils.closeQuietly(pathChildrenCache);
+		CloseableUtils.closeQuietly(client);
+		if (null != executor && !executor.isShutdown()) {
+			executor.shutdown();
+		}
 	}
 
 	public static void main(String[] args) throws Exception {
